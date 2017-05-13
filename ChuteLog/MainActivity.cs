@@ -19,35 +19,78 @@ using System.Threading;
 
 namespace ChuteLog
 {
-	[Activity(Label = "ChuteLog", MainLauncher = true, Icon = "@drawable/icon")]
-	public class MainActivity : Activity, ILocationListener
+	class ChuteLogServiceConnection : Java.Lang.Object, IServiceConnection
 	{
-		struct LogPoint
+		MainActivity activity;
+
+		public ChuteLogServiceConnection(MainActivity activity)
 		{
-			public double lat, lon, alt, millis;
+			this.activity = activity;
 		}
 
-		private const int FREQ_BT_ALT = 3;
-		private const int FREQ_LOGGING = 3;
-		//private const string DEVICE_ADDRESS = "20:13:10:15:33:66";//HC-05
-		private const string DEVICE_ADDRESS = "98:d3:31:90:2d:0e";//HC-06
-		private UUID PORT_UUID = UUID.FromString("00001101-0000-1000-8000-00805f9b34fb");//Serial Port Service ID
-		static readonly string TAG = "X:" + typeof(MainActivity).Name;
-		BluetoothAdapter bluetoothAdapter;
-		BluetoothDevice device;
-		BluetoothSocket btsocket;
-		Stream inputStream, outputStream;
-		LocationManager _locationManager;
-		LogPoint currentpos;
-		double freq_gps = 0.0f;
-		DateTime datePrevLoc = DateTime.Now, dtStartLogging;
+		public void OnServiceConnected(ComponentName name, IBinder servicebinder)
+		{
+			var binder = servicebinder as ChuteLogService.ChuteLogServiceBinder;
+			if (binder != null)
+			{
+				activity.LogDebug("OnServiceConnected");
+				activity.binder = binder;
+				activity.isBound = true;
+				binder.ServiceStatusChanged -= activity.OnServiceStatusChanged;
+				binder.ServiceStatusChanged += activity.OnServiceStatusChanged;
+				activity.TryInit();
+			}
+		}
 
-		string _locationProvider;
+		public void OnServiceDisconnected(ComponentName name)
+		{
+			activity.isBound = false;
+		}
+	}
+
+	[BroadcastReceiver(Enabled = true, Exported = false)]
+	public class BluetoothStateReceiver : BroadcastReceiver
+	{
+		MainActivity activity;
+		public BluetoothStateReceiver()
+		{
+
+		}
+		public BluetoothStateReceiver(MainActivity _activity)
+		{
+			activity = _activity;
+		}
+		public override void OnReceive(Context context, Intent intent)
+		{
+			String action = intent.Action;
+
+			if (action.Equals(BluetoothAdapter.ActionStateChanged))
+			{
+				int bluetoothState = intent.GetIntExtra(BluetoothAdapter.ExtraState,
+																						BluetoothAdapter.Error);
+				switch (bluetoothState)
+				{
+					case (int)State.On:
+						activity?.TryInit(true);
+						break;
+				}
+			}
+		}
+	}
+
+	[Activity(Label = "ChuteLog", MainLauncher = true, Icon = "@drawable/icon")]
+	public class MainActivity : Activity
+	{
+		static readonly string TAG = "X:" + typeof(MainActivity).Name;
+
 		TextView tvGPSStatus, tvLog;
 		Button btnGo, btnInitBT, btnInitGPS;
 		Handler handler;
-		
-		List<LogPoint> points = new List<LogPoint>();
+
+		public ChuteLogService.ChuteLogServiceBinder binder = null;
+		public bool isBound = false;
+		ChuteLogServiceConnection chutelogServiceConnection;
+		BluetoothStateReceiver bluetoothstatereceiver;
 
 		readonly string[] PermissionsLocation =
 		{
@@ -60,17 +103,26 @@ namespace ChuteLog
 			Manifest.Permission.BluetoothAdmin
 		};
 		const int RequestLocationId = 0, RequestBluetoothId = 1;
-		bool bPermLoc = false, bPermBluetooth = false, bOkBluetooth = false, bOkGPS = false, bRecording = false, bInit = false;
+		bool bPermLoc = false, bPermBluetooth = false, bInit = false;
 
-		public bool CanRecord { get { return bOkBluetooth && bOkGPS; } }
-
-		void TryInit()
+		public bool IsRecording
 		{
-			handler = new Handler();
+			get
+			{
+				return binder?.IsRecording ?? false;
+			}
+		}
+
+		public void TryInit(bool force = false)
+		{
+			// si déjà initialisé alors on quitte
+			if (!force && bInit)
+				return;
 			if ((int)Build.VERSION.SdkInt < 23)
 			{
 				bPermLoc = true;
 				bPermBluetooth = true;
+				Init();
 				return;
 			}
 
@@ -150,107 +202,34 @@ namespace ChuteLog
 				Init();
 		}
 
-		void InitializeLocationManager()
+		void Init()
 		{
-			_locationManager = (LocationManager)GetSystemService(LocationService);
-			Criteria criteriaForLocationService = new Criteria
+			if (!bPermLoc/* || !bPermBluetooth*/)
 			{
-				Accuracy = Accuracy.Fine
-			};
-			IList<string> acceptableLocationProviders = _locationManager.GetProviders(criteriaForLocationService, true);
-
-			if (acceptableLocationProviders.Any())
-			{
-				_locationProvider = acceptableLocationProviders.First();
+				ExitActivity();
+				return;
 			}
-			else
-			{
-				_locationProvider = string.Empty;
-			}
-			Log.Debug(TAG, "Using " + _locationProvider + ".");
-		}
-
-		bool InitializeBluetoothAltitude()
-		{
-			bluetoothAdapter = BluetoothAdapter.DefaultAdapter;
-
+			// test si le bluetooth doit être activé
+			BluetoothAdapter bluetoothAdapter = BluetoothAdapter.DefaultAdapter;
 			if (bluetoothAdapter == null)
 			{
 				Toast.MakeText(this, "Device doesnt Support Bluetooth", ToastLength.Short).Show();
-				return false;
+				return;
 			}
 			if (!bluetoothAdapter.IsEnabled)
 			{
 				Intent enableAdapter = new Intent(BluetoothAdapter.ActionRequestEnable);
 				StartActivityForResult(enableAdapter, 0);
-				return false;
+				// le retour est géré grâce au BluetoothStateReceiver
+				return;
 			}
 
-			var bondeddevices = bluetoothAdapter.BondedDevices;
-
-			if (bondeddevices.Count <= 0)
-			{
-				Toast.MakeText(this, "Please Pair the Device first", ToastLength.Short).Show();
-				return false;
-			}
-			else
-			{
-				foreach (BluetoothDevice devicetmp in bondeddevices)
-				{
-					if (devicetmp.Address.Equals(DEVICE_ADDRESS))
-					{
-						device = devicetmp;
-						break;
-					}
-				}
-				if (device == null)
-					device = bondeddevices.FirstOrDefault(d => d.Name.Equals("HC-06", StringComparison.OrdinalIgnoreCase));
-				if (device == null)
-					device = bluetoothAdapter.GetRemoteDevice(DEVICE_ADDRESS);
-				if (device == null)
-				{
-					Toast.MakeText(this, "Unable to find bluetooth altitude sensor!!!", ToastLength.Short).Show();
-					return false;
-				}
-			}
-			try
-			{
-				btsocket = device.CreateRfcommSocketToServiceRecord(PORT_UUID);
-				btsocket.Connect();
-			}
-			catch (Exception ex)
-			{
-				Toast.MakeText(this, "Unable to connect to bluetooth altitude sensor!!!", ToastLength.Short).Show();
-				LogDebug(ex.Message);
-				return false;
-			}
-			inputStream = btsocket.InputStream;
-			outputStream = btsocket.OutputStream;
-
-			return true;
-		}
-
-		private void ResetBT()
-		{
-			bOkBluetooth = false;
-			if (inputStream != null)
-			{
-				try { inputStream.Close(); } catch (Exception) { }
-				inputStream = null;
-			}
-
-			if (outputStream != null)
-			{
-				try { outputStream.Close(); } catch (Exception) { }
-				outputStream = null;
-			}
-
-			if (btsocket != null)
-			{
-				try { btsocket.Close(); } catch (Exception) { }
-				btsocket = null;
-			}
-
+			LogDebug("Init binder==" + (binder?.GetHashCode().ToString() ?? "null"));
+			binder?.Init();
+			// todo ;faire la suite  au retour de l'init du service et pas avnat
+			UpdateStatus();
+			bInit = true;
+			UpdateStatus();
 		}
 
 		//https://blog.xamarin.com/requesting-runtime-permissions-in-android-marshmallow/
@@ -260,7 +239,6 @@ namespace ChuteLog
 		protected override void OnCreate(Bundle bundle)
 		{
 			base.OnCreate(bundle);
-			LogDebug("Create!");
 
 			// Set our view from the "main" layout resource
 			SetContentView(Resource.Layout.Main);
@@ -271,32 +249,52 @@ namespace ChuteLog
 			tvLog = FindViewById<TextView>(Resource.Id.tvLog);
 			tvLog.MovementMethod = new Android.Text.Method.ScrollingMovementMethod();
 
+			handler = new Handler();
+
+			IntentFilter filter = new IntentFilter(BluetoothAdapter.ActionStateChanged);
+			bluetoothstatereceiver = new BluetoothStateReceiver(this);
+			RegisterReceiver(bluetoothstatereceiver, filter);
+
+			LogDebug("Create!");
+
 			btnGo.Click -= BtnGo_Click;
 			btnGo.Click += BtnGo_Click;
 			btnInitBT.Click -= BtnInitBT_Click;
 			btnInitBT.Click += BtnInitBT_Click;
 			btnInitGPS.Click -= btnInitGPS_Click;
 			btnInitGPS.Click += btnInitGPS_Click;
-			btnGo.Text = this.Resources.GetString(bRecording ? Resource.String.btnGo_Stop : Resource.String.btnGo_Go);
-			if (!bInit)
-				TryInit();
+			btnGo.Text = this.Resources.GetString(IsRecording ? Resource.String.btnGo_Stop : Resource.String.btnGo_Go);
+		}
+
+		protected override void OnStart()
+		{
+			base.OnStart();
+			LogDebug("start! Android Build SDK Ver "+ Build.VERSION.SdkInt.ToString());
+			var chutelogServiceIntent = new Intent(this, typeof(ChuteLogService));// ("net.pasutto.ChuteLogService");
+			chutelogServiceConnection = new ChuteLogServiceConnection(this);
+			bool b = BindService(chutelogServiceIntent, chutelogServiceConnection, Bind.AutoCreate);
+			//StartService(chutelogServiceIntent);
+			LogDebug("BindService returned " + b.ToString());
+		}
+
+		protected override void OnDestroy()
+		{
+			base.OnDestroy();
+			LogDebug("destroy!");
+			UnregisterReceiver(bluetoothstatereceiver);
+			// on ne détruit pas le service si on quitte l'application!!!
+			/*if (isBound)
+			{
+				UnbindService(chutelogServiceConnection);
+				isBound = false;
+			}*/
 		}
 
 		private void BtnInitBT_Click(object sender, EventArgs e)
 		{
 			btnInitBT.Enabled = false;
-			ResetBT();
-			if (!InitializeBluetoothAltitude())
-			{
-				bOkBluetooth = false;
-				//ExitActivity();
-				//return;
-			}
-			else
-			{
-				bOkBluetooth = true;
-				ListenBluetoothAltitude();
-			}
+			binder?.InitBluetooth();
+			// TODO : faire la suite dans le onstatuschanged
 			btnInitBT.Enabled = true;
 			UpdateStatus();
 		}
@@ -304,12 +302,13 @@ namespace ChuteLog
 		private void btnInitGPS_Click(object sender, EventArgs e)
 		{
 			btnInitGPS.Enabled = false;
-			InitializeLocationManager();
+			binder?.InitGPS();
+			// TODO : faire la suite dans le onstatuschanged
 			btnInitGPS.Enabled = true;
 			UpdateStatus();
 		}
 
-		void LogDebug(string text, bool bcr = true)
+		public void LogDebug(string text, bool bcr = true)
 		{
 			handler?.Post(() =>
 			{
@@ -321,120 +320,6 @@ namespace ChuteLog
 					tvLog.ScrollTo(0, y);
 				}
 			});
-		}
-
-		void Init()
-		{
-			if (!bPermLoc/* || !bPermBluetooth*/)
-			{
-				ExitActivity();
-				return;
-			}
-			if (!InitializeBluetoothAltitude())
-			{
-				bOkBluetooth = false;
-				//ExitActivity();
-				//return;
-			}
-			else
-			{
-				bOkBluetooth = true;
-				ListenBluetoothAltitude();
-			}
-			UpdateStatus();
-			InitializeLocationManager();
-			bInit = true;
-			UpdateStatus();
-		}
-
-		void LogData()
-		{
-			//Handler handler = new Handler();
-			new Thread(() =>
-			{
-				while (bRecording)
-				{
-					points.Add(new LogPoint()
-					{
-						lat = currentpos.lat,
-						lon = currentpos.lon,
-						alt = currentpos.alt,
-						millis = (DateTime.Now - dtStartLogging).TotalMilliseconds
-					});
-					Thread.Sleep((int)Math.Round(1000.0f / ((double)FREQ_LOGGING)));
-				}
-			}).Start();
-		}
-
-		void ListenBluetoothAltitude()
-		{
-			Handler handler = new Handler();
-			byte[] inBuf = new byte[4];
-			byte[] buf = new byte[2] { 65, 0x0A };
-			int tmpLen = 0, readLen = 0;
-			new Thread(() =>
-			{
-				if (bOkBluetooth)
-				{
-					//send Reset
-					buf[0] = 82;//'R'
-					buf[1] = 0x0A;
-				}
-				while (bOkBluetooth && Thread.CurrentThread.IsAlive)
-				{
-					try
-					{
-						tmpLen = readLen = 0;
-						outputStream.Write(buf, 0, 2);
-						//send GetAltitude
-						buf[0] = 65;//'A'
-						buf[1] = 0x0A;
-						//LogDebug("BT Send Command...", false);
-						outputStream.Write(buf, 0, 2);
-						//LogDebug("sent");
-						while (readLen < inBuf.Length && (tmpLen = inputStream.Read(buf, 0, 1)) > 0)
-						{
-							//LogDebug("BT Read "+(int)buf[0]);
-							inBuf[readLen] = buf[0];
-							readLen += 1;
-						}
-						if (readLen == 4)
-							currentpos.alt = BitConverter.ToSingle(inBuf, 0);
-						//if (readLen < inBuf.Length - 1)
-						//	inBuf[readLen] = 0;
-						//if (readLen > 0)
-						//	LogDebug("BT Received " + readLen + "B");// : " + Encoding.ASCII.GetString(inBuf.Take(readLen).ToArray()));
-					}
-					catch (Exception ex)
-					{
-						//handler.Post(() => { Toast.MakeText(this, ex.Message, ToastLength.Long); });
-						LogDebug("BT Error : " + ex.Message);
-						bOkBluetooth = false;
-					}
-					Thread.Sleep((int)Math.Round(1000.0f / ((double)FREQ_BT_ALT)));
-				}
-			}).Start();
-		}
-
-		void SaveLog()
-		{
-			String filename = "ChuteLog_" + dtStartLogging.ToString("yyyyMMddHHmmss") + ".csv";
-			if (Android.OS.Environment.ExternalStorageState == Android.OS.Environment.MediaMounted)
-			{
-				/*using (Stream fos = OpenFileOutput(FILENAME, FileCreationMode.Private))
-				{
-				}*/
-				var documentsPath = System.Environment.GetFolderPath(System.Environment.SpecialFolder.Personal);
-				documentsPath = Android.OS.Environment.GetExternalStoragePublicDirectory(Android.OS.Environment.DirectoryDownloads).Path;
-				var filePath = Path.Combine(documentsPath, filename);
-				LogDebug("Writing " +
-					points.Count + " to " + filePath);
-				File.WriteAllLines(filePath, points.Select(p =>
-				string.Format("{0:f5};{1:f5};{2:f5};{3:f5}", p.millis, p.lat, p.lon, p.alt)
-				));
-				LogDebug("Done.");
-				points.Clear();
-			}
 		}
 
 		private void ExitActivity(int delay = 2000)
@@ -451,79 +336,60 @@ namespace ChuteLog
 			intent.SetFlags(ActivityFlags.NewTask);
 			StartActivity(intent);*/
 		}
+		
+		public void OnServiceStatusChanged(object sender, ChuteLogService.ServiceStatusChangedType status, string message = "")
+		{
+			switch (status)
+			{
+				case ChuteLogService.ServiceStatusChangedType.INIT_ENDED:
+					btnGo.Enabled = /*(binder?.IsBluetoothOK ?? false) && */(binder?.IsGPSOK ?? false);
+					break;
+				case ChuteLogService.ServiceStatusChangedType.ERROR:
+					Toast.MakeText(this, message, ToastLength.Short).Show();
+					break;
+				case ChuteLogService.ServiceStatusChangedType.LOCATION_CHANGED:
+					UpdateStatus();
+					LogDebug("LocationChanged");
+					break;
+			}
+		}
 
 		void UpdateStatus()
 		{
 			tvGPSStatus.Text =
 				string.Format("{3} : GPS {0} ({1:f1} Hz), Bluetooth {2}, Alt={4} m",
-				bOkGPS ? "OK" : "KO", freq_gps, bOkBluetooth ? "OK" : "KO",
-				bRecording ? "Recording" : "Idle", (int)Math.Round(currentpos.alt));
+				(binder?.IsGPSOK ?? false) ? "OK" : "KO", (binder?.FreqGPS ?? 0.0d), (binder?.IsBluetoothOK ?? false) ? "OK" : "KO",
+				IsRecording ? "Recording" : "Idle", (int)Math.Round(binder?.CurrentAlt ?? 0.0d));
 		}
 
 		private void BtnGo_Click(object sender, System.EventArgs e)
 		{
-			//Toast.MakeText(this, "click", ToastLength.Long).Show();
-			if (!bRecording && points.Any())
-				Toast.MakeText(this, "Busy!!!", ToastLength.Long).Show();
-			else if (!bRecording )
+			if (binder?.IsRecording ?? false)
 			{
-				btnGo.Text = this.Resources.GetString(Resource.String.btnGo_Stop);
-				bRecording = true;
-				dtStartLogging = DateTime.Now;
-				LogData();
+				btnGo.Text = this.Resources.GetString(Resource.String.btnGo_Go);
+				string strFile = binder?.EndLogging();
+				if (strFile != null)
+					Toast.MakeText(this, "File saved in \"" + strFile + "\"", ToastLength.Short).Show();
 			}
 			else
 			{
-				btnGo.Text = this.Resources.GetString(Resource.String.btnGo_Go);
-				bRecording = false;
-				SaveLog();
+				if ((binder?.StartLogging() ?? false) && (binder?.IsRecording ?? false))
+					btnGo.Text = this.Resources.GetString(Resource.String.btnGo_Stop);
 			}
+			return;
 		}
 
 		protected override void OnResume()
 		{
 			base.OnResume();
 			LogDebug("Resume!");
-			_locationManager?.RequestLocationUpdates(_locationProvider, 0, 0, this);
 		}
 
 		protected override void OnPause()
 		{
 			base.OnPause();
 			LogDebug("Pause!");
-			_locationManager?.RemoveUpdates(this);
 		}
-
-		public void OnLocationChanged(Location location)
-		{
-			LogDebug("LocationChanged");
-			Location _currentLocation = location;
-			TimeSpan tsgps = DateTime.Now - datePrevLoc;
-			datePrevLoc = DateTime.Now;
-			if (_currentLocation == null)
-			{
-				btnGo.Enabled = false;
-				bOkGPS = false;
-			}
-			else
-			{
-				bOkGPS = true;
-				currentpos.lat = _currentLocation.Latitude;
-				currentpos.lon = _currentLocation.Longitude;
-				if (!bOkBluetooth)
-					currentpos.alt = _currentLocation.Altitude;
-				if (!btnGo.Enabled)
-					btnGo.Enabled = true;
-				freq_gps = 1.0f / (tsgps.TotalMilliseconds / 1000.0f);
-			}
-			UpdateStatus();
-		}
-
-		public void OnProviderDisabled(string provider) { }
-
-		public void OnProviderEnabled(string provider) { }
-
-		public void OnStatusChanged(string provider, [GeneratedEnum] Availability status, Bundle extras) { }
 	}
 }
 
