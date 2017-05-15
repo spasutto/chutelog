@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -26,8 +26,10 @@ namespace ChuteLog
 		ChuteLogServiceBinder binder;
 		bool recording = false, okbluetooth = false, okgps = false;
 
-		private const int FREQ_BT_ALT = 3;
-		private const int FREQ_LOGGING = 3;
+		private const int FREQ_BT_ALT = 5;
+		private const int FREQ_LOGGING = 5;
+		private int periode_bt_alt = Math.Max(25, (int)Math.Round(1000.0f / ((double)FREQ_BT_ALT)));
+		private int periode_freq_logging = Math.Max(25, (int)Math.Round(1000.0f / ((double)FREQ_LOGGING)));
 		//private const string DEVICE_ADDRESS = "20:13:10:15:33:66";//HC-05
 		private const string DEVICE_ADDRESS = "98:d3:31:90:2d:0e";//HC-06
 		private UUID PORT_UUID = UUID.FromString("00001101-0000-1000-8000-00805f9b34fb");//Serial Port Service ID
@@ -269,13 +271,13 @@ namespace ChuteLog
 					//send Reset
 					buf[0] = 82;//'R'
 					buf[1] = 0x0A;
+					outputStream.Write(buf, 0, 2);
 				}
 				while (okbluetooth && Thread.CurrentThread.IsAlive)
 				{
 					try
 					{
 						tmpLen = readLen = 0;
-						outputStream.Write(buf, 0, 2);
 						//send GetAltitude
 						buf[0] = 65;//'A'
 						buf[1] = 0x0A;
@@ -301,7 +303,7 @@ namespace ChuteLog
 						//handler.Post(() => { Toast.MakeText(this, ex.Message, ToastLength.Long); });
 						OnServiceStatusChanged(this, ServiceStatusChangedType.ERROR, "BT Error : " + ex.Message);
 					}
-					Thread.Sleep((int)Math.Round(1000.0f / ((double)FREQ_BT_ALT)));
+					Thread.Sleep(periode_bt_alt);
 				}
 			}).Start();
 		}
@@ -359,14 +361,12 @@ namespace ChuteLog
 					try
 					{
 						//if (Math.Abs(currentpos.lat) > double.Epsilon && Math.Abs(currentpos.lon) > double.Epsilon)
-							points.Add(new LogPoint()
-							{
-								lat = currentpos.lat,
-								lon = currentpos.lon,
-								alt = currentpos.alt,
-								millis = (DateTime.Now - dtStartLogging).TotalMilliseconds
-							});
-						Thread.Sleep((int)Math.Round(1000.0f / ((double)FREQ_LOGGING)));
+						currentpos.millis = (DateTime.Now - dtStartLogging).TotalMilliseconds;
+						points.Add(currentpos);
+						// tous les 50 points on sauve le CSV (au cas où le service se fait tuer)
+						if (points.Count > 50)
+							SaveCSV();
+						Thread.Sleep(periode_freq_logging);
 					}
 					catch (Java.Lang.InterruptedException e)
 					{
@@ -405,7 +405,7 @@ namespace ChuteLog
 					var documentsPath = System.Environment.GetFolderPath(System.Environment.SpecialFolder.Personal);
 					documentsPath = Android.OS.Environment.GetExternalStoragePublicDirectory(Android.OS.Environment.DirectoryDownloads).Path;
 					filename = Path.Combine(documentsPath, filename);
-					File.WriteAllLines(filename, points.Select(p =>
+					File.AppendAllLines(filename, points.Select(p =>
 					string.Format("{0:f5};{1:f5};{2:f5};{3:f5}", p.millis, p.lat, p.lon, p.alt)
 					));
 				}
