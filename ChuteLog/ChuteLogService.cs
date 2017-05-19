@@ -24,10 +24,11 @@ namespace ChuteLog
 	{
 		private static String TAG = "X:" + typeof(ChuteLogService).Name;
 		ChuteLogServiceBinder binder;
-		bool recording = false, okbluetooth = false, okgps = false;
+		bool recording = false, okbluetooth = false, okgps = false, initended = false;
 
 		private const int FREQ_BT_ALT = 5;
 		private const int FREQ_LOGGING = 5;
+		private const int AUTO_STOP_TIMER = 45 * 60 * 1000;// 45 minutes
 		private int periode_bt_alt = Math.Max(25, (int)Math.Round(1000.0f / ((double)FREQ_BT_ALT)));
 		private int periode_freq_logging = Math.Max(25, (int)Math.Round(1000.0f / ((double)FREQ_LOGGING)));
 		//private const string DEVICE_ADDRESS = "20:13:10:15:33:66";//HC-05
@@ -50,6 +51,7 @@ namespace ChuteLog
 		DateTime datePrevLoc = DateTime.Now, dtStartLogging;
 		LogPoint currentpos;
 
+		public bool IsInit { get { return initended; } }
 		public bool IsRecording { get { return recording; } }
 		public bool IsBluetoothOK { get { return okbluetooth; } }
 		public bool IsGPSOK { get { return okgps; } }
@@ -70,6 +72,7 @@ namespace ChuteLog
 			public event ServiceStatusChangedEventHandler ServiceStatusChanged;
 			ChuteLogService service = null;
 			public ChuteLogService Service { get { return service; } }
+			public bool IsInit { get { return service.IsInit; } }
 			public bool IsRecording { get { return service.IsRecording; } }
 			public bool IsBluetoothOK { get { return service.IsBluetoothOK; } }
 			public bool IsGPSOK { get { return service.IsGPSOK; } }
@@ -147,6 +150,7 @@ namespace ChuteLog
 		#region INIT
 		public void Init()
 		{
+			okbluetooth = okgps = initended = false;
 			// TODO : faire ça dans un thread!!!
 			if (!InitializeBluetoothAltitude())
 			{
@@ -163,6 +167,7 @@ namespace ChuteLog
 			OnServiceStatusChanged(this, ServiceStatusChangedType.INIT_ENDED);
 			// TODO virer ça ?
 			_locationManager?.RequestLocationUpdates(_locationProvider, 0, 0, this);
+			initended = true;
 		}
 
 		private void ResetBT()
@@ -367,6 +372,8 @@ namespace ChuteLog
 						if (points.Count > 50)
 							SaveCSV();
 						Thread.Sleep(periode_freq_logging);
+						if (currentpos.millis > AUTO_STOP_TIMER)
+							EndLogging();
 					}
 					catch (Java.Lang.InterruptedException e)
 					{

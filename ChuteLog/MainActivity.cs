@@ -103,7 +103,7 @@ namespace ChuteLog
 			Manifest.Permission.BluetoothAdmin
 		};
 		const int RequestLocationId = 0, RequestBluetoothId = 1;
-		bool bPermLoc = false, bPermBluetooth = false, bInit = false;
+		bool bPermLoc = false, bPermBluetooth = false;
 
 		public bool IsRecording
 		{
@@ -116,7 +116,7 @@ namespace ChuteLog
 		public void TryInit(bool force = false)
 		{
 			// si déjà initialisé alors on quitte
-			if (!force && bInit)
+			if (!force && (binder?.IsInit ?? false))
 				return;
 			if ((int)Build.VERSION.SdkInt < 23)
 			{
@@ -227,8 +227,6 @@ namespace ChuteLog
 			LogDebug("Init binder==" + (binder?.GetHashCode().ToString() ?? "null"));
 			binder?.Init();
 			// todo ;faire la suite  au retour de l'init du service et pas avnat
-			UpdateStatus();
-			bInit = true;
 			UpdateStatus();
 		}
 
